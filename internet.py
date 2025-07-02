@@ -1,0 +1,178 @@
+import os
+import tensorflow as tf
+import shutil
+import rarfile
+
+# Directorio base donde se encuentran las carpetas de clases
+BASE_DIR = 'C:/Users/Administrador/Desktop/oso'  # Ajusta la ruta a la raíz de tu proyecto
+
+# 1) Directorio destino donde copiarás las imágenes
+DST_ROOT = os.path.join(BASE_DIR, 'dataset')
+
+# 2) Límite de imágenes por clase
+LIMIT_PER_CLASS = 500
+
+# 3) Encuentra todas las carpetas de clases dentro del directorio BASE_DIR
+# Filtra carpetas que no sean carpetas de clases válidas (por ejemplo, evita directorios del sistema y 'venv')
+all_dirs = [d for d in os.listdir(BASE_DIR) 
+            if os.path.isdir(os.path.join(BASE_DIR, d)) 
+            and d not in ['Boot', 'Windows', 'Program Files', 'ProgramData', '$RECYCLE.BIN', 'System Volume Information', 'Documents and Settings', 'venv','dataset']]  # Excluye 'venv'
+
+print("Clases detectadas:", all_dirs)
+
+# 4) Crear la carpeta dataset y las subcarpetas para cada clase
+os.makedirs(DST_ROOT, exist_ok=True)
+
+# Para cada clase, crear una subcarpeta en 'dataset' y copiar las imágenes
+for cls in all_dirs:
+    src_dir = os.path.join(BASE_DIR, cls)
+    dst_dir = os.path.join(DST_ROOT, cls)
+    
+    # Crear la subcarpeta para la clase si no existe
+    os.makedirs(dst_dir, exist_ok=True)
+
+    # Listar los archivos de la clase (solo archivos de imagen)
+    files = [f for f in os.listdir(src_dir) if os.path.isfile(os.path.join(src_dir, f)) and not f.startswith('.')]
+    
+    # Imprimir la cantidad de archivos en la clase antes de copiar
+    print(f"📊 Clase '{cls}' tiene {len(files)} archivos")
+
+    # Copiar hasta LIMIT_PER_CLASS imágenes
+    to_copy = files[:LIMIT_PER_CLASS]
+
+    for fname in to_copy:
+        try:
+            shutil.copy(os.path.join(src_dir, fname), os.path.join(dst_dir, fname))
+        except PermissionError as e:
+            print(f"⚠️ No se pudo copiar el archivo {fname} de '{cls}' debido a permisos.")
+
+    print(f"✅ Clase '{cls}': copiadas {len(to_copy)} imágenes a '{dst_dir}'")
+
+# Resumen final de lo copiado
+print("\n🌟 Estructura final en 'dataset/':")
+for cls in all_dirs:
+    count = len(os.listdir(os.path.join(DST_ROOT, cls)))
+    print(f"  └── {cls}/ ({count} imágenes)")
+
+# **Cargar imágenes y crear los datasets de entrenamiento y validación**
+raw_train_ds = tf.keras.utils.image_dataset_from_directory(
+    DST_ROOT,  # Ahora desde 'dataset'
+    validation_split=0.2,
+    subset='training',
+    seed=42,
+    image_size=(224, 224),
+    batch_size=32
+)
+print("Clases detectadas:", raw_train_ds.class_names)
+
+raw_val_ds = tf.keras.utils.image_dataset_from_directory(
+    DST_ROOT,  # Ahora desde 'dataset'
+    validation_split=0.2,
+    subset='validation',
+    seed=42,
+    image_size=(224, 224),
+    batch_size=32
+)
+
+# 3) Normalización sin aumento de datos
+normalization = tf.keras.layers.Rescaling(1./255)
+
+train_ds = raw_train_ds \
+    .map(lambda x, y: (normalization(x), y), tf.data.AUTOTUNE) \
+    .shuffle(1000) \
+    .prefetch(tf.data.AUTOTUNE)
+
+val_ds = raw_val_ds \
+    .map(lambda x, y: (normalization(x), y), tf.data.AUTOTUNE) \
+    .cache() \
+    .prefetch(tf.data.AUTOTUNE)
+
+# **Crear el modelo de clasificación utilizando MobileNetV2**
+base_model = tf.keras.applications.MobileNetV2(
+    input_shape=(224, 224, 3),
+    include_top=False,
+    weights='imagenet',
+    pooling='avg'
+)
+base_model.trainable = False
+
+num_classes = len(raw_train_ds.class_names)
+model = tf.keras.Sequential([
+    base_model,
+    tf.keras.layers.Dense(128, activation='relu'),
+    tf.keras.layers.Dropout(0.5),
+    tf.keras.layers.Dense(num_classes, activation='softmax')
+])
+
+model.compile(
+    optimizer='adam',
+    loss='sparse_categorical_crossentropy',
+    metrics=['accuracy']
+)
+
+model.summary()
+
+# ----> Aquí definimos el EarlyStopping:
+early_stop = tf.keras.callbacks.EarlyStopping(
+    monitor='val_loss',     # Monitorea la pérdida de validación
+    patience=5,             # Espera 5 épocas sin mejora antes de detenerse
+    restore_best_weights=True  # Restaura los pesos del mejor momento
+)
+
+# Entrenamiento del modelo con Early Stopping
+EPOCHS = 100
+
+history = model.fit(
+    train_ds,
+    epochs=EPOCHS,
+    validation_data=val_ds,
+    callbacks=[early_stop],  # <-- aplicamos el callback
+    verbose=1
+)
+# **Graficar la precisión y la pérdida**
+import matplotlib.pyplot as plt
+
+acc = history.history['accuracy']
+val_acc = history.history['val_accuracy']
+loss = history.history['loss']
+val_loss = history.history['val_loss']
+
+num_epochs = len(acc)
+epochs_range = range(num_epochs)
+
+plt.figure(figsize=(8,8))
+
+plt.subplot(1,2,1)
+plt.plot(epochs_range, acc, label='Precisión Entrenamiento')
+plt.plot(epochs_range, val_acc, label='Precisión Validación')
+plt.legend(loc='lower right')
+plt.title('Precisión Entrenamiento y Validación')
+
+plt.subplot(1,2,2)
+plt.plot(epochs_range, loss, label='Pérdida Entrenamiento')
+plt.plot(epochs_range, val_loss, label='Pérdida Validación')
+plt.legend(loc='upper right')
+plt.title('Pérdida Entrenamiento y Validación')
+
+plt.tight_layout()
+plt.show()
+
+
+# Crear carpeta destino si no existe
+os.makedirs("modelo_cocina/1", exist_ok=True)
+
+# Guardar el modelo en formato .h5
+model.save('modelo_cocina/1/modelo_entrenado.h5')
+print("✅ Modelo guardado en 'modelo_cocina/1/modelo_entrenado.h5'")
+
+# Exportar como SavedModel (solo si estás usando Keras 3.x)
+try:
+    model.export('modelo_cocina/1/saved_model')
+    print("✅ Modelo exportado en formato SavedModel en 'modelo_cocina/1/saved_model'")
+except AttributeError:
+    print("⚠️ Tu versión de Keras no tiene 'model.export'. Usando model.save con carpeta como alternativa...")
+    model.save('modelo_cocina/1/saved_model')
+
+# Comprimir el modelo
+shutil.make_archive('modelo_cocina/1', 'zip', 'modelo_cocina/1')
+print("✅ Modelo comprimido como 'modelo_cocina/1.zip'")
